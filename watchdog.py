@@ -261,12 +261,12 @@ class Watchdog(object):
         for t in [ self.listener_thread, self.eh_thread ]:
           if t.is_alive() is False:
             self.logger.critical("Thread {} has exited -- exiting".format(t.name))
+            # Some of our processes have failed. We will start the exit procedure for the supervisor.
             raise StartExit
         try:
           sig = self.signalq.get(timeout=1)
           if sig in self.exit_signals or sig == signal.SIGUSR1:
-            # We will exit with nonzero exitcode
-            # and kill the supervisor with us
+            # Watched processes have failed. We will start the exit procedure for the supervisor.
             raise StartExit
           if sig in self.stop_signals:
             # We will exit with an exitcode of zero
@@ -275,9 +275,7 @@ class Watchdog(object):
         except queue.Empty:
           pass
     except (KeyboardInterrupt, StartExit):
-      time.sleep(1)
       self.make_supervisor_exit()
-      do_exit(1)
 
 
 def main(argv):
