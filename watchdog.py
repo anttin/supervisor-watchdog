@@ -1,17 +1,55 @@
-import anoptions
 import datetime
 import json
-import psutil
+import os
 import re
 import signal
 import sys
 import threading
 import queue
 
-from anoptions import Parameter, Options
-from collections import namedtuple
+import psutil
 
-ProcessEvent = namedtuple('ProcessEvent', 'dt process event expected')
+from anoptions import Parameter, Options
+
+# pylint: disable=useless-object-inheritance
+# pylint: disable=too-many-instance-attributes
+# pylint: disable=too-many-return-statements
+
+
+class ProcessEvent(object):
+  def __init__(self, headers, payload, dt):
+    self.headers  = headers
+    self.payload  = payload
+    self.dt       = dt
+    self.process  = payload["processname"] if "processname" in payload else None
+
+    rex = re.match('^PROCESS_STATE_(.+)$', headers["eventname"])
+    if rex:
+      self.event = rex.groups()[0]
+      if "expected" in payload:
+        self.expected = (payload["expected"] == "1")
+      else:
+        self.expected = None
+    else:
+      self.event    = None
+      self.expected = None
+
+
+  def get(self, for_json=False):
+    return {
+      "dt": self.dt if for_json is False else self.dt.isoformat(),
+      "process":  self.process,
+      "event":    self.event,
+      "expected": self.expected
+    }
+
+
+  def getall(self, for_json=False):
+    return {
+      "dt": self.dt if for_json is False else self.dt.isoformat(),
+      "headers": self.headers,
+      "payload": self.payload
+    }
 
 
 class Watchdog(object):
@@ -19,8 +57,8 @@ class Watchdog(object):
     self.config = config
 
     self.exit_signals = [
-      signal.SIGHUP, 
-      signal.SIGINT, 
+      signal.SIGHUP,
+      signal.SIGINT,
       signal.SIGTERM
     ]
 
@@ -30,19 +68,19 @@ class Watchdog(object):
 
     self.supervisor_pid = self.get_supervisor_pid()
     self.supervisor_proc = self.get_process(self.supervisor_pid)
-   
+
     self.eventq = queue.Queue()
     self.signalq = queue.Queue()
- 
+
     self.listener_thread = threading.Thread(target=self.listener)
     self.listener_thread.name = 'listener'
     self.listener_thread.setDaemon(True)
-    self.listener_thread.start()   
+    self.listener_thread.start()
 
     self.eh_thread = threading.Thread(target=self.eventhandler)
     self.eh_thread.name = 'eventhandler'
     self.eh_thread.setDaemon(True)
-    self.eh_thread.start()   
+    self.eh_thread.start()
 
 
   @staticmethod
@@ -59,6 +97,12 @@ class Watchdog(object):
     sys.stderr.flush()
 
 
+  @classmethod
+  def write_json_stderr(cls, msg_template, json_data):
+    msg = msg_template.format(data=json.dumps(json_data, indent=4))
+    cls.write_stderr(msg + "\n")
+
+
   def listener(self):
     while True:
       # transition from ACKNOWLEDGED to READY
@@ -72,33 +116,26 @@ class Watchdog(object):
       text = sys.stdin.read(int(headers['len']))
       payload = dict([ x.split(':') for x in text.split() ])
 
-      data = {
-        "headers": headers,
-        "payload": payload,
-        "dt": datetime.datetime.now()
-      }
+      pevent = ProcessEvent(headers, payload, datetime.datetime.now())
 
-      self.eventq.put_nowait(data)
+      self.eventq.put_nowait(pevent)
 
       if self.config["silent"] is False:
-        data["dt"] = data["dt"].isoformat()
-        self.write_stderr(json.dumps(data, indent=4)+"\n")
-      
+        self.write_json_stderr("{data}", pevent.getall(for_json=True))
+
       # transition from READY to ACKNOWLEDGED
       self.write_stdout('RESULT 2\nOK')
 
 
   @staticmethod
   def file_exists(filename):
-    import os
-    return filename is not None and os.path.exists(filename) and os.path.isfile(filename)  
+    return filename is not None and os.path.exists(filename) and os.path.isfile(filename)
 
 
   @staticmethod
   def load_text(filename):
     result = None
     if filename == '-':
-      import sys
       f = sys.stdin
     else:
       f = open(filename, 'r', encoding='utf8')
@@ -112,11 +149,7 @@ class Watchdog(object):
     if not self.file_exists(pidfile):
       self.write_stderr("Pidfile not found -- exiting\n")
       sys.exit(1)
-    try:
-      pid = int(self.load_text(pidfile).strip())
-    except:
-      self.write_stderr("Error reading pidfile -- exiting\n")
-      sys.exit(1)
+    pid = int(self.load_text(pidfile).strip())
     return pid
 
 
@@ -127,7 +160,7 @@ class Watchdog(object):
       p = psutil.Process(pid)
       return p
     except psutil.NoSuchProcess:
-      return None  
+      return None
 
 
   def make_supervisor_exit(self):
@@ -144,7 +177,7 @@ class Watchdog(object):
         return False
 
       # Inspect if stopped / stopping processed have extended their stop time allowance
-      elif processevent.event in ('STOPPED', 'STOPPING'):
+      if processevent.event in ('STOPPED', 'STOPPING'):
         t = config["wait_stopped"]
         if t != 0:
           limit_dt = processevent.dt + datetime.timedelta(seconds=t)
@@ -153,22 +186,21 @@ class Watchdog(object):
         return False
 
       # Inspect if expectedly exited processed have extended their stop time allowance
-      elif processevent.event == 'EXITED' and processevent.expected is True:
+      if processevent.event == 'EXITED' and processevent.expected is True:
         t = config["wait_expected"]
         if t != 0:
           limit_dt = processevent.dt + datetime.timedelta(seconds=t)
           if limit_dt >= dt:
             return False
-        return True      
+        return True
 
       # Inspect other (unexpected) exits ('BACKOFF', 'EXITED', 'FATAL', 'UNKNOWN')
-      else:
-        t = config["wait_unexpected"]
-        if t != 0:
-          limit_dt = processevent.dt + datetime.timedelta(seconds=t)
-          if limit_dt >= dt:
-            return False
-        return True         
+      t = config["wait_unexpected"]
+      if t != 0:
+        limit_dt = processevent.dt + datetime.timedelta(seconds=t)
+        if limit_dt >= dt:
+          return False
+      return True
 
     while True:
       try:
@@ -188,9 +220,9 @@ class Watchdog(object):
           status.values()
         ))
         if len(lst) > 0:
-          self.write_stderr("Process states that are violating required state:\n")
-          self.write_stderr("Exiting.\n")
-          self.write_stderr(json.dumps(lst, indent=4)+"\n")
+          msg = "Process states that are violating required state:\n{data}\nExiting.\n"
+          _lst = [ x.get(for_json=True) for x in lst ]
+          self.write_json_stderr(msg, _lst)
           # Use SIGUSR1 internally to signal our main thread to start exiting
           self.signalq.put(signal.SIGUSR1)
 
@@ -198,20 +230,9 @@ class Watchdog(object):
         event = self.eventq.get(timeout=1)
 
         # We got an event
-        rex = re.match('^PROCESS_STATE_(.+)$', event["headers"]["eventname"])
-        if rex:
-          if "expected" in event["payload"]:
-            expected = (event["payload"]["expected"] == "1")
-          else: 
-            expected = None
-          pname = event["payload"]["processname"]
-          status[pname] = ProcessEvent(
-            dt       = event["dt"],
-            process  = pname,
-            event    = rex.groups()[0],
-            expected = expected 
-          )
-        elif event["headers"]["eventname"] == "TICK_60":
+        if event.event is not None:
+          status[event.process] = event
+        elif event.headers["eventname"] == "TICK_60":
           last_tick = datetime.datetime.now()
 
       except queue.Empty:
@@ -219,7 +240,7 @@ class Watchdog(object):
 
 
   def signal_handler(self, signum, frame):
-    sig = signal.Signals(signum)
+    sig = signal.Signals(signum) # pylint: disable=no-member
     self.signalq.put_nowait(sig)
 
 
@@ -227,18 +248,23 @@ class Watchdog(object):
     class StartExit(Exception):
       pass
 
-    for sig in self.exit_signals:
+    for sig in [ *self.exit_signals, *self.stop_signals ]:
       signal.signal(sig, self.signal_handler)
 
     try:
       while True:
+        # Check that all out daemon threads are alive
+        for t in [ self.listener_thread, self.eh_thread ]:
+          if t.is_alive() is False:
+            self.write_stderr("Thread {} has exited -- exiting".format(t.name))
+            raise StartExit
         try:
           sig = self.signalq.get(timeout=1)
           if sig in self.exit_signals or sig == signal.SIGUSR1:
             # We will exit with nonzero exitcode
             # and kill the supervisor with us
             raise StartExit
-          elif sig in self.stop_signals:
+          if sig in self.stop_signals:
             # We will exit with an exitcode of zero
             # and leave supervisord running
             break
@@ -273,4 +299,4 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+  main(sys.argv[1:])
