@@ -1,10 +1,13 @@
 import datetime
 import json
+import logging
+import logging.handlers
 import os
 import re
 import signal
 import sys
 import threading
+import time
 import queue
 
 import psutil
@@ -14,6 +17,12 @@ from anoptions import Parameter, Options
 # pylint: disable=useless-object-inheritance
 # pylint: disable=too-many-instance-attributes
 # pylint: disable=too-many-return-statements
+# pylint: disable=logging-format-interpolation
+
+
+def do_exit(exitcode):
+  logging.shutdown()
+  sys.exit(exitcode)
 
 
 class ProcessEvent(object):
@@ -53,8 +62,9 @@ class ProcessEvent(object):
 
 
 class Watchdog(object):
-  def __init__(self, config):
+  def __init__(self, config, logger):
     self.config = config
+    self.logger = logger
 
     self.exit_signals = [
       signal.SIGHUP,
@@ -91,16 +101,9 @@ class Watchdog(object):
 
 
   @staticmethod
-  def write_stderr(s):
-    # write other messages here
-    sys.stderr.write(s)
-    sys.stderr.flush()
-
-
-  @classmethod
-  def write_json_stderr(cls, msg_template, json_data):
+  def get_json_msg(msg_template, json_data):
     msg = msg_template.format(data=json.dumps(json_data, indent=4))
-    cls.write_stderr(msg + "\n")
+    return msg
 
 
   def listener(self):
@@ -120,8 +123,8 @@ class Watchdog(object):
 
       self.eventq.put_nowait(pevent)
 
-      if self.config["silent"] is False:
-        self.write_json_stderr("{data}", pevent.getall(for_json=True))
+      msg = self.get_json_msg("{data}", pevent.getall(for_json=True))
+      self.logger.debug(msg)
 
       # transition from READY to ACKNOWLEDGED
       self.write_stdout('RESULT 2\nOK')
@@ -147,8 +150,8 @@ class Watchdog(object):
   def get_supervisor_pid(self):
     pidfile = self.config["pidfile"]
     if not self.file_exists(pidfile):
-      self.write_stderr("Pidfile not found -- exiting\n")
-      sys.exit(1)
+      self.logger.critical("Pidfile not found -- exiting")
+      do_exit(1)
     pid = int(self.load_text(pidfile).strip())
     return pid
 
@@ -164,7 +167,7 @@ class Watchdog(object):
 
 
   def make_supervisor_exit(self):
-    self.supervisor_proc.send_signal(signal.SIGQUIT)
+    self.supervisor_proc.send_signal(signal.SIGQUIT)    
 
 
   def eventhandler(self):
@@ -209,7 +212,7 @@ class Watchdog(object):
           self.config["notick"] is False and
           last_tick + datetime.timedelta(seconds=75) < datetime.datetime.now()
         ):
-          self.write_stderr("Did not receive TICK_60 in time -- exiting\n")
+          self.logger.critical("Did not receive TICK_60 in time -- exiting")
           # Use SIGUSR1 internally to signal our main thread to start exiting
           self.signalq.put(signal.SIGUSR1)
 
@@ -220,9 +223,10 @@ class Watchdog(object):
           status.values()
         ))
         if len(lst) > 0:
-          msg = "Process states that are violating required state:\n{data}\nExiting.\n"
+          _msg = "Process states that are violating required state:\n{data}\nExiting."
           _lst = [ x.get(for_json=True) for x in lst ]
-          self.write_json_stderr(msg, _lst)
+          msg = self.get_json_msg(_msg, _lst)
+          self.logger.critical(msg)
           # Use SIGUSR1 internally to signal our main thread to start exiting
           self.signalq.put(signal.SIGUSR1)
 
@@ -256,7 +260,7 @@ class Watchdog(object):
         # Check that all out daemon threads are alive
         for t in [ self.listener_thread, self.eh_thread ]:
           if t.is_alive() is False:
-            self.write_stderr("Thread {} has exited -- exiting".format(t.name))
+            self.logger.critical("Thread {} has exited -- exiting".format(t.name))
             raise StartExit
         try:
           sig = self.signalq.get(timeout=1)
@@ -271,8 +275,9 @@ class Watchdog(object):
         except queue.Empty:
           pass
     except (KeyboardInterrupt, StartExit):
+      time.sleep(1)
       self.make_supervisor_exit()
-      sys.exit(1)
+      do_exit(1)
 
 
 def main(argv):
@@ -282,20 +287,29 @@ def main(argv):
     Parameter("waite",   int, "wait_expected",   short_name='W', default=0),
     Parameter("waits",   int, "wait_stopped",    short_name='S', default=0),
     Parameter("notick", Parameter.flag, "notick"),
-    Parameter("silent", Parameter.flag, "silent")
+    Parameter("loglevel",    str, "loglevel",    default='INFO')
   ]
 
   opt = Options(parameters, argv, "watchdog")
   config = opt.eval()
 
+  logging.basicConfig(format="%(asctime)-15s %(name)s %(levelname)s %(message)s")
+  logger = logging.getLogger("watchdog")
+  logger.setLevel(config["loglevel"])
+
+  if os.path.exists("/dev/log"):
+    handler = logging.handlers.SysLogHandler(address="/dev/log")
+    logger.addHandler(handler)
+
   required = [ "pidfile" ]
   for x in required:
     if x not in config:
-      Watchdog.write_stderr("{} is a required parameter -- exiting\n".format(x.upper()))
-      sys.exit(1)
+      logger.critical("{} is a required parameter -- exiting\n".format(x.upper()))
+      do_exit(1)
 
-  o = Watchdog(config)
+  o = Watchdog(config, logger)
   o.run()
+  do_exit(0)
 
 
 if __name__ == '__main__':
