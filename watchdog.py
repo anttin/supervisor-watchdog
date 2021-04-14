@@ -167,7 +167,7 @@ class Watchdog(object):
 
 
   def make_supervisor_exit(self):
-    self.supervisor_proc.send_signal(signal.SIGQUIT)    
+    self.supervisor_proc.send_signal(signal.SIGQUIT)
 
 
   def eventhandler(self):
@@ -261,7 +261,8 @@ class Watchdog(object):
         for t in [ self.listener_thread, self.eh_thread ]:
           if t.is_alive() is False:
             self.logger.critical("Thread {} has exited -- exiting".format(t.name))
-            # Some of our processes have failed. We will start the exit procedure for the supervisor.
+            # Some of our processes have failed.
+            # We will start the exit procedure for the supervisor.
             raise StartExit
         try:
           sig = self.signalq.get(timeout=1)
@@ -276,7 +277,8 @@ class Watchdog(object):
           pass
     except (KeyboardInterrupt, StartExit):
       self.make_supervisor_exit()
-
+      time.sleep(1)
+      do_exit(1)
 
 def main(argv):
   parameters = [
