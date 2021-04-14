@@ -12,8 +12,8 @@ git clone https://github.com/anttin/supervisor-watchdog.git /usr/local/bin/super
 cd /usr/local/bin/supervisor-watchdog
 
 # optionally create and activate a virtual environment (typically not useful for container deployments)
-python3 -m venv venv-swd
-source venv-swd/bin/activate
+python3 -m venv venv-watchdog
+source venv-watchdog/bin/activate
 
 # install dependencies
 python3 -m pip install -r /usr/local/bin/supervisor-watchdog/requirements.txt
@@ -36,9 +36,8 @@ nodaemon=true
 pidfile=/var/run/supervisord.pid
 
 [eventlistener:watchdog]
-command=/usr/bin/python3 /usr/local/bin/supervisor-watchdog/watchdog.py -s -p /var/run/supervisord.pid
+command=/usr/bin/python3 /usr/local/bin/supervisor-watchdog/watchdog.py -s -p /var/run/supervisord.pid -w 10 -W 10 -S 10
 events=PROCESS_STATE_STOPPED,PROCESS_STATE_EXITED,PROCESS_STATE_UNKNOWN,PROCESS_STATE_FATAL,PROCESS_STATE,TICK_60
-stderr_logfile=/var/log/supervisor-watchdog.log
 stopsignal=QUIT
 ```
 
@@ -57,7 +56,7 @@ The optional configuration options are:
 -W|--waite     <seconds>
 -S|--waits     <seconds>
 -n|--notick
--s|--silent
+-l|--loglevel  <loglevel>
 ```
 
 `pidfile` is the file path to supervisord's pidfile.
@@ -70,4 +69,4 @@ The optional configuration options are:
 
 `notick` is a flag that when set overrides the automatic kill of supervisord if the 60 second tick messages stop coming.
 
-`silent` is a flag which when set, ensures that the application does not log events to the stderr-log.
+`loglevel` is the desired logging level. Default is `INFO`. 
